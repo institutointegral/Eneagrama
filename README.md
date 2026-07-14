@@ -8,6 +8,42 @@ contas, categorias, lançamentos, recorrências e metas.
 avançados, billing e onboarding self-service automatizado. Essas fases futuras
 se apoiam neste schema.
 
+## Status: validado em projeto Supabase real
+
+As 10 migrations foram aplicadas em um projeto Supabase real (`eneagrama-financeiro`,
+região `sa-east-1`, ref `rviuyizhcbgiofkbauwk`), não apenas testadas localmente.
+Validação feita diretamente no Postgres hospedado, simulando dois usuários
+autenticados reais via RLS (sessões `authenticated` + `request.jwt.claim.sub`):
+
+- `create_tenant`, contas (incluindo cartão de crédito), categorias (36 padrão
+  do sistema seedadas), lançamentos à vista e parcelados, metas — todos
+  funcionando.
+- Recorrência mensal gerou 13 lançamentos projetados no horizonte de 12 meses.
+- `settle_transaction` baixou um projetado corretamente: o original permanece
+  `projected` com `settled_by` preenchido, e o novo `realized` tem
+  `linked_transaction_id` apontando de volta, sem duplicar o valor.
+- Isolamento entre tenants confirmado: um segundo usuário não enxerga
+  tenants/contas/transações do primeiro (`select`), e uma tentativa de
+  `insert` direta no tenant alheio (com o UUID exato) foi rejeitada pela RLS.
+- Uma vulnerabilidade real encontrada pelos advisors de segurança do Supabase
+  foi corrigida e revalidada: `generate_recurrence_transactions` (SECURITY
+  DEFINER) aceitava qualquer `recurrence_id` sem checar se o chamador
+  pertencia àquele tenant — um usuário autenticado podia forçar geração de
+  lançamentos em outro tenant chamando a RPC diretamente. Corrigido com um
+  guard `is_tenant_member` interno (migration
+  `20260714000010_security_and_performance_hardening.sql`) e revalidado: a
+  mesma chamada maliciosa agora é um no-op.
+- Todos os dados de teste (tenants, usuários fake) foram removidos ao final;
+  o projeto ficou só com as 36 categorias padrão do sistema.
+
+O app React ainda não foi exercitado ponta-a-ponta num navegador contra esse
+projeto: o sandbox onde esta sessão roda bloqueia por política de rede a
+conexão de saída até `*.supabase.co` a partir do runtime do navegador/app
+(um teste local com Playwright confirmou isso — o proxy da sandbox rejeitou
+a conexão com 403). Isso é uma restrição do ambiente de desenvolvimento, não
+do código: rodando `npm run dev` em uma máquina sem essa política de rede, o
+app se conecta normalmente ao projeto real (`app/.env` já aponta para ele).
+
 ## Estrutura do repositório
 
 ```
