@@ -59,6 +59,7 @@ export function RecurrencesPage() {
   const [submitting, setSubmitting] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [generated, setGenerated] = useState<Transaction[]>([]);
+  const [refreshingProjections, setRefreshingProjections] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!activeTenant) return;
@@ -142,15 +143,39 @@ export function RecurrencesPage() {
     refresh();
   }
 
+  async function handleRefreshProjections() {
+    if (!activeTenant) return;
+    setRefreshingProjections(true);
+    const { error } = await supabase.rpc('refresh_recurrence_projections', { p_tenant_id: activeTenant.id });
+    setRefreshingProjections(false);
+    if (error) {
+      alert(error.message);
+      return;
+    }
+    if (expandedId) {
+      const { data } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('recurrence_id', expandedId)
+        .order('date', { ascending: true });
+      if (data) setGenerated(data);
+    }
+    refresh();
+  }
+
   const categoryOptionsForType = categories.filter((c) => c.type === form.type);
 
   return (
     <div>
       <div className="page-header">
         <h1>Recorrências</h1>
+        <button type="button" className="secondary-button" onClick={handleRefreshProjections} disabled={refreshingProjections}>
+          {refreshingProjections ? 'Atualizando...' : 'Atualizar Projeções'}
+        </button>
       </div>
       <p className="muted" style={{ marginBottom: 16 }}>
-        Cada regra gera automaticamente lançamentos projetados para os próximos 12 meses.
+        Cada regra gera automaticamente lançamentos projetados para os próximos 12 meses. Use "Atualizar
+        Projeções" para rolar a janela adiante conforme o tempo passa (não há cron nesta fase).
       </p>
 
       {loading ? (

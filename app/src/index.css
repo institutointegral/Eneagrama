@@ -7,6 +7,8 @@
   --accent: #6d28d9;
   --accent-bg: rgba(109, 40, 217, 0.08);
   --danger: #dc2626;
+  --warning: #b45309;
+  --warning-bg: rgba(180, 83, 9, 0.12);
   --income: #15803d;
   --expense: #dc2626;
   --muted: #71717a;
@@ -27,6 +29,8 @@
     --accent: #a78bfa;
     --accent-bg: rgba(167, 139, 250, 0.15);
     --danger: #f87171;
+    --warning: #fbbf24;
+    --warning-bg: rgba(251, 191, 36, 0.15);
     --income: #4ade80;
     --expense: #f87171;
     --muted: #a1a1aa;
@@ -132,7 +136,8 @@ button, input, select, textarea {
   flex: 1;
   text-align: center;
   padding: 8px 2px;
-  font-size: 0.78em;
+  font-size: 0.7em;
+  line-height: 1.2;
   color: var(--muted);
   text-decoration: none;
   border-radius: 8px;
@@ -380,6 +385,16 @@ button, input, select, textarea {
   color: var(--income);
 }
 
+.badge.near {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.badge.over {
+  background: rgba(220, 38, 38, 0.12);
+  color: var(--danger);
+}
+
 .empty-state {
   text-align: center;
   color: var(--muted);
@@ -440,4 +455,8 @@ button, input, select, textarea {
 
 .progress-bar-fill.over {
   background: var(--danger);
+}
+
+.progress-bar-fill.near {
+  background: var(--warning);
 }

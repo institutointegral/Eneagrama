@@ -5,25 +5,10 @@ import { useAccounts } from '../hooks/useAccounts';
 import { useCategories } from '../hooks/useCategories';
 import type { Goal, GoalPeriod, GoalType } from '../lib/database.types';
 import { Modal } from '../components/Modal';
+import { GOAL_STATUS_LABELS, fetchGoalCurrentAmount, goalStatus } from '../lib/goals';
 
 function formatCurrency(value: number) {
   return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-}
-
-// Resolves the concrete [start, end] date window a goal's progress is measured
-// over "right now": the current calendar month/year for recurring periods, or
-// the goal's own explicit range for a custom period.
-function resolvePeriodRange(goal: Goal): { start: string; end: string } {
-  const today = new Date();
-  if (goal.period === 'monthly') {
-    const start = new Date(today.getFullYear(), today.getMonth(), 1);
-    const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-    return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
-  }
-  if (goal.period === 'yearly') {
-    return { start: `${today.getFullYear()}-01-01`, end: `${today.getFullYear()}-12-31` };
-  }
-  return { start: goal.start_date, end: goal.end_date ?? goal.start_date };
 }
 
 interface FormState {
@@ -56,7 +41,7 @@ export function GoalsPage() {
   const { categories } = useCategories();
 
   const [goals, setGoals] = useState<Goal[]>([]);
-  const [progress, setProgress] = useState<Record<string, number>>({});
+  const [progress, setProgress] = useState<Record<string, number | null>>({});
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<FormState>(emptyForm());
@@ -81,33 +66,9 @@ export function GoalsPage() {
   }, [activeTenant]);
 
   async function loadProgress(goalsList: Goal[]) {
-    const entries: Record<string, number> = {};
+    const entries: Record<string, number | null> = {};
     for (const goal of goalsList) {
-      if (goal.type === 'budget' && goal.category_id) {
-        const { start, end } = resolvePeriodRange(goal);
-        const { data } = await supabase
-          .from('transactions')
-          .select('amount')
-          .eq('category_id', goal.category_id)
-          .eq('status', 'realized')
-          .gte('date', start)
-          .lte('date', end);
-        entries[goal.id] = (data ?? []).reduce((sum, t) => sum + Number(t.amount), 0);
-      } else if (goal.type === 'savings' && goal.account_id) {
-        const { data } = await supabase
-          .from('transactions')
-          .select('amount, type')
-          .eq('account_id', goal.account_id)
-          .eq('status', 'realized');
-        const account = accounts.find((a) => a.id === goal.account_id);
-        const net = (data ?? []).reduce(
-          (sum, t) => sum + (t.type === 'income' ? Number(t.amount) : -Number(t.amount)),
-          account?.initial_balance ?? 0
-        );
-        entries[goal.id] = net;
-      } else {
-        entries[goal.id] = 0;
-      }
+      entries[goal.id] = await fetchGoalCurrentAmount(goal, accounts);
     }
     setProgress(entries);
   }
@@ -169,10 +130,12 @@ export function GoalsPage() {
           {goals.map((goal) => {
             const category = categories.find((c) => c.id === goal.category_id);
             const account = accounts.find((a) => a.id === goal.account_id);
-            const current = progress[goal.id] ?? 0;
-            const ratio = goal.target_amount > 0 ? current / goal.target_amount : 0;
+            const current = progress[goal.id] ?? null;
             const isBudget = goal.type === 'budget';
-            const over = isBudget && ratio > 1;
+            const status = goalStatus(goal, current);
+            const ratio = current !== null && goal.target_amount > 0 ? current / goal.target_amount : 0;
+            const badgeClass =
+              status === 'over_budget' ? 'over' : status === 'near_limit' ? 'near' : status === 'completed' ? 'settled' : '';
 
             return (
               <div key={goal.id} className="card">
@@ -180,6 +143,7 @@ export function GoalsPage() {
                   <div>
                     <div className="card-title">
                       {goal.description || (isBudget ? `Orçamento: ${category?.name ?? ''}` : 'Meta de poupança')}
+                      <span className={`badge ${badgeClass}`}>{GOAL_STATUS_LABELS[status]}</span>
                     </div>
                     <div className="card-subtitle">
                       {isBudget ? 'Orçamento' : 'Poupança'} ·{' '}
@@ -192,16 +156,23 @@ export function GoalsPage() {
                   </button>
                 </div>
 
-                <div className="progress-bar">
-                  <div
-                    className={`progress-bar-fill ${over ? 'over' : ''}`}
-                    style={{ width: `${Math.min(100, Math.max(0, ratio * 100))}%` }}
-                  />
-                </div>
-                <div className="card-subtitle">
-                  {formatCurrency(current)} de {formatCurrency(goal.target_amount)}
-                  {over ? ' · acima do orçamento' : ''}
-                </div>
+                {current === null ? (
+                  <p className="muted" style={{ marginTop: 8 }}>
+                    Vincule uma conta a esta meta para acompanhar o progresso automaticamente.
+                  </p>
+                ) : (
+                  <>
+                    <div className="progress-bar">
+                      <div
+                        className={`progress-bar-fill ${status === 'over_budget' ? 'over' : status === 'near_limit' ? 'near' : ''}`}
+                        style={{ width: `${Math.min(100, Math.max(0, ratio * 100))}%` }}
+                      />
+                    </div>
+                    <div className="card-subtitle">
+                      {formatCurrency(current)} de {formatCurrency(goal.target_amount)} ({Math.round(ratio * 100)}%)
+                    </div>
+                  </>
+                )}
               </div>
             );
           })}

@@ -1,12 +1,16 @@
-# Controle Financeiro — Fase 1: Fundação (SaaS Multi-Tenant)
+# Controle Financeiro — SaaS Multi-Tenant
 
-Fase 1 de um app de controle financeiro pessoal/familiar multi-tenant: modelo de
-dados no Supabase (Postgres + RLS) e um app React que cobre o CRUD manual de
-contas, categorias, lançamentos, recorrências e metas.
+App de controle financeiro pessoal/familiar multi-tenant: modelo de dados no
+Supabase (Postgres + RLS) e um app React. **Fase 1** entregou o CRUD manual de
+contas, categorias, lançamentos, recorrências e metas. **Fase 2** (esta versão)
+adiciona fluxo de caixa, dashboards/gráficos e a engine de cálculo de progresso
+de metas, sobre o mesmo schema — nenhuma tabela da Fase 1 foi alterada
+estruturalmente.
 
-**Fora de escopo nesta fase:** WhatsApp, IA/Gemini, OCR, gráficos/dashboards
-avançados, billing e onboarding self-service automatizado. Essas fases futuras
-se apoiam neste schema.
+**Fora de escopo até aqui:** WhatsApp, IA/Gemini, OCR, billing e onboarding
+self-service automatizado, cron automático de recorrência (a geração é
+automática na criação da regra + sob demanda via botão, ver abaixo). Essas
+fases futuras se apoiam neste schema.
 
 ## Status: validado em projeto Supabase real
 
@@ -196,6 +200,100 @@ mês a mês a partir da data informada. A UI (`TransactionsPage`) permite
 marcar a primeira parcela como já realizada (as demais nascem `projected`), ou
 todas como projetadas.
 
+## Fase 2 — fluxo de caixa, dashboards e engine de metas
+
+### Geração de recorrência sob demanda
+
+A geração automática da Fase 1 continua valendo (trigger no insert/reativação
+de uma `recurrence`, veja "Lógica de recorrência e projeção" acima). A Fase 2
+adiciona `refresh_recurrence_projections(p_tenant_id)`
+(`supabase/migrations/20260715000001_refresh_recurrence_projections.sql`): uma
+function tenant-scoped, chamável pelo app (`authenticated`), com guard
+`is_tenant_member(p_tenant_id)`, que percorre as recorrências ativas do tenant
+chamando `generate_recurrence_transactions` (idempotente, Fase 1) em cada uma.
+É o botão **"Atualizar Projeções"** na tela de Recorrências — a via manual
+que substitui um cron nesta fase (`extend_all_recurrences`, da Fase 1,
+continua reservada a `postgres`/`service_role`/pg_cron, não é chamável pelo
+app). Validado no projeto real: duas chamadas seguidas não duplicam
+lançamentos, e uma tentativa de um usuário acionar a atualização passando o
+`tenant_id` de outro tenant é rejeitada.
+
+### Nota técnica: cálculo da fatura do cartão de crédito
+
+Implementado em `currentCardCycle` (`app/src/lib/cashFlow.ts`), client-side —
+não há function Postgres para isso, é só leitura/cálculo sobre dados já
+buscados:
+
+- O ciclo atual fecha no dia `closing_day` do mês corrente se hoje ainda não
+  passou desse dia, senão fecha no `closing_day` do mês seguinte (dias
+  maiores que o tamanho do mês são ajustados para o último dia, ex.:
+  `closing_day = 31` em fevereiro vira dia 28/29).
+- O início do ciclo é o dia seguinte ao fechamento anterior.
+- O vencimento assume o padrão mais comum: se `due_day <= closing_day`,
+  vence no mês **seguinte** ao fechamento (ex.: fecha dia 28, vence dia 5);
+  caso contrário, vence no mesmo mês do fechamento. Isso é uma simplificação
+  — faturas com regras de vencimento diferentes da convenção comum
+  precisariam de um campo explícito de "dias entre fechamento e vencimento"
+  em vez de inferir a partir de `due_day` isolado; ver "Fora de escopo"
+  abaixo.
+- **"Fatura em aberto"** = soma das transações da conta cartão com `date`
+  dentro da janela do ciclo (`computeOpenInvoice`), incluindo tanto
+  `realized` quanto `projected` (uma parcela futura já datada dentro do
+  ciclo conta para aquela fatura). Esse valor **não afeta o saldo de
+  nenhuma outra conta** — a regra da Fase 1 continua valendo: o impacto no
+  fluxo de caixa só acontece quando o pagamento da fatura é lançado como uma
+  transação própria na conta que paga. A tela de Fluxo de Caixa mostra os
+  dois números lado a lado (fatura em aberto vs. saldo em cascata) quando o
+  escopo selecionado é uma conta de cartão específica.
+
+### Nota técnica: progresso de metas de poupança
+
+Implementado em `fetchGoalCurrentAmount` (`app/src/lib/goals.ts`):
+
+- **Com `account_id` vinculado** (o caminho recomendado): progresso =
+  `initial_balance` da conta + soma de receitas menos despesas `realized`
+  daquela conta desde `goals.start_date`.
+- **Sem conta vinculada**: a Fase 2 **não implementa** uma fonte alternativa
+  de dados. A tabela `goals` da Fase 1 tem a constraint
+  `goals_savings_no_category` (metas de poupança não podem ter
+  `category_id`), e o enunciado desta fase pede para não alterar o schema
+  estruturalmente — então não há como reaproveitar `category_id` como um
+  "rótulo de aporte" sem uma migration de schema. A decisão tomada foi a
+  mais simples possível dentro dessa restrição: a UI mostra
+  "sem acompanhamento automático" e orienta o usuário a vincular uma conta.
+  Para uma Fase 3, as alternativas mais diretas são (a) uma coluna
+  `current_amount` numérica atualizável manualmente, ou (b) uma tabela
+  separada de aportes (`goal_contributions`) — qualquer uma delas é uma
+  migration aditiva, não uma alteração estrutural das tabelas existentes.
+
+### Nota técnica: evolução mensal e possível dupla contagem
+
+O gráfico de evolução mensal (receita vs. despesa) soma **todas** as
+transações `realized` de todas as contas, inclusive cartão de crédito — é
+uma visão de "comportamento de gasto", não de caixa (por isso não exclui
+cartões, ao contrário do card de "saldo disponível" e do fluxo de caixa).
+Ressalva para a Fase 3: como esta fase não automatiza a baixa de fatura do
+cartão (ver acima), se o usuário lançar manualmente tanto a compra no cartão
+quanto o pagamento da fatura como despesas separadas, a evolução mensal conta
+o mesmo gasto duas vezes (uma no mês da compra, outra no mês do pagamento). A
+Fase 1 já previa esse fluxo de pagamento como responsabilidade manual do
+usuário; uma automação de baixa de fatura (linkando a transação de pagamento
+às transações da fatura que ela quita, similar ao `settle_transaction` de
+projetados) resolveria isso e é a recomendação para a Fase 3.
+
+### Gráficos
+
+Os 3 componentes (`app/src/components/charts/`) usam Recharts com a paleta
+categórica e as cores de status validadas pelo skill de dataviz
+(`scripts/validate_palette.js`, PASS em light e dark — ver
+`chartColors.ts`). Gastos por categoria é uma **barra horizontal** (não
+pizza): com várias categorias e nomes longos, barra com rótulo direto lê
+melhor e evita depender só de cor para identificar a fatia, seguindo a
+recomendação do skill para "parte-do-todo" com mais de 2-3 categorias.
+Orçado-vs-realizado no Dashboard não usa gráfico de barras — é uma lista de
+meters (barra de progresso), reaproveitando o mesmo componente visual das
+metas, por ser uma "razão contra um limite" por categoria.
+
 ## Segurança / RLS
 
 Toda tabela sensível (`accounts`, `categories` custom, `recurrences`,
@@ -216,6 +314,10 @@ consegue ler nem inserir dados no tenant do outro).
 
 - Integração WhatsApp (entrada de lançamentos via mensagem).
 - IA/Gemini para categorização automática e OCR de comprovantes/faturas.
-- Dashboards e gráficos (a base de `goals`/`transactions` já suporta os
-  cálculos; falta a camada visual).
 - Billing/planos SaaS e onboarding self-service multi-tenant automatizado.
+- Cron automático de recorrência (hoje é geração na criação da regra +
+  botão manual "Atualizar Projeções" — ver Fase 2 acima).
+- Automação de baixa de fatura de cartão (ver nota técnica acima sobre
+  possível dupla contagem na evolução mensal).
+- Acompanhamento de metas de poupança sem conta vinculada (ver nota técnica
+  acima).

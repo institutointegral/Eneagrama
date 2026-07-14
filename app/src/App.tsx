@@ -10,6 +10,9 @@ import { AccountsPage } from './pages/AccountsPage';
 import { CategoriesPage } from './pages/CategoriesPage';
 import { RecurrencesPage } from './pages/RecurrencesPage';
 import { GoalsPage } from './pages/GoalsPage';
+import { DashboardPage } from './pages/DashboardPage';
+import { CashFlowPage } from './pages/CashFlowPage';
+import { MorePage } from './pages/MorePage';
 
 function FullScreenLoader() {
   return (
@@ -55,11 +58,14 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route index element={<TransactionsPage />} />
+        <Route index element={<DashboardPage />} />
+        <Route path="transactions" element={<TransactionsPage />} />
+        <Route path="cash-flow" element={<CashFlowPage />} />
         <Route path="accounts" element={<AccountsPage />} />
         <Route path="categories" element={<CategoriesPage />} />
         <Route path="recurrences" element={<RecurrencesPage />} />
         <Route path="goals" element={<GoalsPage />} />
+        <Route path="more" element={<MorePage />} />
       </Route>
     </Routes>
   );
