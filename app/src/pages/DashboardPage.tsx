@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabaseClient';
 import { useTenant } from '../contexts/TenantContext';
@@ -64,25 +64,45 @@ export function DashboardPage() {
   const [drillParentId, setDrillParentId] = useState<string | null>(null);
   const [breakdownPeriod, setBreakdownPeriod] = useState<BreakdownPeriod>('this_month');
 
-  useEffect(() => {
+  const refresh = useCallback(async () => {
     if (!activeTenant) return;
     setLoading(true);
-    Promise.all([
+    const [txRes, goalsRes] = await Promise.all([
       supabase.from('transactions').select('*').eq('tenant_id', activeTenant.id),
       supabase.from('goals').select('*').eq('tenant_id', activeTenant.id),
-    ]).then(async ([txRes, goalsRes]) => {
-      const tx = txRes.data ?? [];
-      const gl = goalsRes.data ?? [];
-      setTransactions(tx);
-      setGoals(gl);
-      const progress: Record<string, number | null> = {};
-      for (const g of gl) {
-        if (g.type === 'budget') progress[g.id] = await fetchGoalCurrentAmount(g, []);
-      }
-      setBudgetProgress(progress);
-      setLoading(false);
-    });
+    ]);
+    const tx = txRes.data ?? [];
+    const gl = goalsRes.data ?? [];
+    setTransactions(tx);
+    setGoals(gl);
+    const progress: Record<string, number | null> = {};
+    for (const g of gl) {
+      if (g.type === 'budget') progress[g.id] = await fetchGoalCurrentAmount(g, []);
+    }
+    setBudgetProgress(progress);
+    setLoading(false);
   }, [activeTenant]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Realtime: keep the summary cards and charts in sync with lançamentos
+  // created/edited/settled elsewhere, without a manual reload.
+  useEffect(() => {
+    if (!activeTenant) return;
+    const channel = supabase
+      .channel(`dashboard-transactions-${activeTenant.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'transactions', filter: `tenant_id=eq.${activeTenant.id}` },
+        () => refresh()
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [activeTenant, refresh]);
 
   const categoryById = useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories]);
 

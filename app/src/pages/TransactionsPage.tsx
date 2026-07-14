@@ -29,6 +29,7 @@ interface Filters {
   accountId: string;
   categoryId: string;
   status: '' | TransactionStatus;
+  type: '' | CategoryType;
   startDate: string;
   endDate: string;
 }
@@ -70,6 +71,7 @@ export function TransactionsPage() {
     accountId: '',
     categoryId: '',
     status: '',
+    type: '',
     startDate: firstDayOfMonth(),
     endDate: lastDayOfMonth(),
   });
@@ -96,6 +98,7 @@ export function TransactionsPage() {
     if (filters.accountId) query = query.eq('account_id', filters.accountId);
     if (filters.categoryId) query = query.eq('category_id', filters.categoryId);
     if (filters.status) query = query.eq('status', filters.status);
+    if (filters.type) query = query.eq('type', filters.type);
 
     const { data, error } = await query;
     if (!error && data) setTransactions(data as unknown as TransactionRow[]);
@@ -105,6 +108,24 @@ export function TransactionsPage() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Realtime: reflect inserts/updates/deletes from other tabs, devices, or
+  // (later) automated sources without requiring a manual reload. RLS already
+  // scopes what this subscription can see to the active tenant's rows.
+  useEffect(() => {
+    if (!activeTenant) return;
+    const channel = supabase
+      .channel(`transactions-${activeTenant.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'transactions', filter: `tenant_id=eq.${activeTenant.id}` },
+        () => refresh()
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [activeTenant, refresh]);
 
   const summary = useMemo(() => {
     const totals = { realizedIncome: 0, realizedExpense: 0, projectedIncome: 0, projectedExpense: 0 };
@@ -296,6 +317,14 @@ export function TransactionsPage() {
           <option value="">Realizado + Projetado</option>
           <option value="realized">Realizado</option>
           <option value="projected">Projetado</option>
+        </select>
+        <select
+          value={filters.type}
+          onChange={(e) => setFilters({ ...filters, type: e.target.value as Filters['type'] })}
+        >
+          <option value="">Receita + Despesa</option>
+          <option value="income">Receita</option>
+          <option value="expense">Despesa</option>
         </select>
         <input
           type="date"

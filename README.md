@@ -294,6 +294,45 @@ Orçado-vs-realizado no Dashboard não usa gráfico de barras — é uma lista d
 meters (barra de progresso), reaproveitando o mesmo componente visual das
 metas, por ser uma "razão contra um limite" por categoria.
 
+## Integração mais próxima do backend (RPCs, Realtime)
+
+Uma rodada de revisão comparou a UI com as functions RPC disponíveis e fechou
+estas lacunas:
+
+- **Preview de próxima recorrência**: o formulário de recorrências chama
+  `supabase.rpc('next_recurrence_date', { p_interval, p_reference_day,
+  p_reference_month, p_from_date })` a cada mudança relevante e mostra a data
+  retornada — nenhuma lógica de data é recalculada no frontend
+  (`app/src/pages/RecurrencesPage.tsx`).
+- **Edição de recorrência**: além de criar, agora dá pra editar uma
+  recorrência existente. Tanto criar quanto editar chamam explicitamente
+  `generate_recurrence_transactions(p_recurrence_id)` depois de salvar — a
+  criação já é coberta pelo trigger da Fase 1, mas a chamada explícita cobre
+  também a edição (que não passa pelo trigger de reativação) e é seguro
+  chamar de novo por ser idempotente. Validado no projeto real: editar o
+  valor de uma recorrência e chamar a function de novo não duplica as
+  transações já geradas (permanece o mesmo total antes/depois).
+- **Saldo atual e fatura em aberto nos cards de conta**: `AccountsPage` agora
+  calcula o saldo atual (`initial_balance` + realizados) por conta, e para
+  cartão de crédito mostra também a fatura em aberto do ciclo vigente,
+  reaproveitando `currentCardCycle`/`computeOpenInvoice`
+  (`app/src/lib/cashFlow.ts`, já usado na tela de Fluxo de Caixa).
+- **Filtro de tipo em Lançamentos**: filtro por receita/despesa, junto dos
+  filtros já existentes de conta/categoria/status/período.
+- **Supabase Realtime em Lançamentos e Dashboard**: as duas telas assinam
+  mudanças (`insert`/`update`/`delete`) na tabela `transactions` via
+  `postgres_changes`, filtradas por `tenant_id`, e recarregam automaticamente
+  — sem precisar dar refresh manual depois de lançar algo em outra aba/dispositivo.
+  Isso exigiu habilitar a replicação Realtime para `transactions`
+  (`alter publication supabase_realtime add table public.transactions`,
+  migration `20260716000001_enable_realtime_transactions.sql`) — RLS
+  continua se aplicando por assinante, então isso só adiciona notificação de
+  mudança para linhas que aquele usuário já poderia ler, não amplia acesso.
+- **Seletor de tenant sempre visível**: o cabeçalho agora sempre mostra um
+  `<select>` com o tenant ativo (desabilitado quando só existe um), deixando
+  a estrutura visivelmente pronta para múltiplos tenants por usuário mesmo
+  que a tela de convite de membros ainda não exista (fora de escopo).
+
 ## Segurança / RLS
 
 Toda tabela sensível (`accounts`, `categories` custom, `recurrences`,

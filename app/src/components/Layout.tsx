@@ -28,11 +28,13 @@ export function Layout() {
             Sair
           </button>
         </div>
-        {tenants.length > 1 && (
+        {activeTenant && (
           <select
             className="tenant-select"
-            value={activeTenant?.id ?? ''}
+            value={activeTenant.id}
             onChange={(e) => setActiveTenantId(e.target.value)}
+            disabled={tenants.length <= 1}
+            title={tenants.length <= 1 ? 'Você ainda participa de um único espaço financeiro' : undefined}
           >
             {tenants.map((t) => (
               <option key={t.id} value={t.id}>

@@ -1,9 +1,10 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import { useTenant } from '../contexts/TenantContext';
 import { useAccounts } from '../hooks/useAccounts';
-import type { Account, AccountType } from '../lib/database.types';
+import type { Account, AccountType, Transaction } from '../lib/database.types';
 import { Modal } from '../components/Modal';
+import { computeOpenInvoice, currentCardCycle } from '../lib/cashFlow';
 
 const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
   checking: 'Conta corrente',
@@ -45,6 +46,42 @@ export function AccountsPage() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+
+  useEffect(() => {
+    if (!activeTenant) return;
+    supabase
+      .from('transactions')
+      .select('account_id, amount, type, status, date')
+      .eq('tenant_id', activeTenant.id)
+      .then(({ data }) => setTransactions((data ?? []) as Transaction[]));
+  }, [activeTenant]);
+
+  // Saldo atual = saldo inicial + realizados daquela conta. Para cartão de
+  // crédito, isso é o "saldo" da própria conta cartão (quanto já foi
+  // debitado dela até agora); a fatura em aberto do ciclo é um número à
+  // parte, calculado abaixo.
+  const currentBalanceByAccount = useMemo(() => {
+    const balances = new Map<string, number>();
+    for (const account of accounts) balances.set(account.id, Number(account.initial_balance));
+    for (const t of transactions) {
+      if (t.status !== 'realized') continue;
+      const current = balances.get(t.account_id);
+      if (current === undefined) continue;
+      balances.set(t.account_id, current + (t.type === 'income' ? Number(t.amount) : -Number(t.amount)));
+    }
+    return balances;
+  }, [accounts, transactions]);
+
+  const openInvoiceByAccount = useMemo(() => {
+    const invoices = new Map<string, number>();
+    for (const account of accounts) {
+      if (account.type !== 'credit_card' || account.closing_day == null || account.due_day == null) continue;
+      const cycle = currentCardCycle(account.closing_day, account.due_day);
+      invoices.set(account.id, computeOpenInvoice(transactions, account.id, cycle));
+    }
+    return invoices;
+  }, [accounts, transactions]);
 
   function openCreate() {
     setEditing(null);
@@ -120,7 +157,10 @@ export function AccountsPage() {
         <div className="empty-state">Nenhuma conta cadastrada ainda.</div>
       ) : (
         <div className="list">
-          {accounts.map((account) => (
+          {accounts.map((account) => {
+            const currentBalance = currentBalanceByAccount.get(account.id) ?? account.initial_balance;
+            const openInvoice = openInvoiceByAccount.get(account.id);
+            return (
             <div key={account.id} className="card">
               <div className="card-row">
                 <div>
@@ -128,10 +168,7 @@ export function AccountsPage() {
                     {account.name}
                     {!account.is_active && <span className="badge">Inativa</span>}
                   </div>
-                  <div className="card-subtitle">
-                    {ACCOUNT_TYPE_LABELS[account.type]} · Saldo inicial{' '}
-                    {formatCurrency(account.initial_balance)}
-                  </div>
+                  <div className="card-subtitle">{ACCOUNT_TYPE_LABELS[account.type]}</div>
                   {account.type === 'credit_card' && (
                     <div className="card-subtitle">
                       Fechamento dia {account.closing_day} · Vencimento dia {account.due_day}
@@ -139,7 +176,21 @@ export function AccountsPage() {
                     </div>
                   )}
                 </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div className="card-subtitle">
+                    {account.type === 'credit_card' ? 'Saldo devedor' : 'Saldo atual'}
+                  </div>
+                  <div className={`amount ${currentBalance < 0 ? 'expense' : 'income'}`}>
+                    {formatCurrency(currentBalance)}
+                  </div>
+                </div>
               </div>
+              {account.type === 'credit_card' && openInvoice !== undefined && (
+                <div className="card-row" style={{ marginTop: 6 }}>
+                  <span className="card-subtitle">Fatura em aberto (ciclo vigente)</span>
+                  <span className="amount expense">{formatCurrency(openInvoice)}</span>
+                </div>
+              )}
               <div className="card-actions">
                 <button type="button" className="secondary-button" onClick={() => openEdit(account)}>
                   Editar
@@ -149,7 +200,8 @@ export function AccountsPage() {
                 </button>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

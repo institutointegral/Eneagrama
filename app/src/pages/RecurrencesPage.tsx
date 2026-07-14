@@ -54,12 +54,15 @@ export function RecurrencesPage() {
   const [recurrences, setRecurrences] = useState<Recurrence[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<Recurrence | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm([]));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [generated, setGenerated] = useState<Transaction[]>([]);
   const [refreshingProjections, setRefreshingProjections] = useState(false);
+  const [previewDate, setPreviewDate] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!activeTenant) return;
@@ -91,13 +94,44 @@ export function RecurrencesPage() {
     if (!error && data) setGenerated(data);
   }
 
+  // Prévia da próxima ocorrência via RPC next_recurrence_date — nunca
+  // recalculamos a regra de data no frontend.
+  useEffect(() => {
+    if (!showForm || !form.reference_day) {
+      setPreviewDate(null);
+      setPreviewError(null);
+      return;
+    }
+    let cancelled = false;
+    supabase
+      .rpc('next_recurrence_date', {
+        p_interval: form.interval,
+        p_reference_day: Number(form.reference_day),
+        p_reference_month: form.interval === 'yearly' ? Number(form.reference_month) : null,
+        p_from_date: form.start_date,
+      })
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          setPreviewError(error.message);
+          setPreviewDate(null);
+        } else {
+          setPreviewError(null);
+          setPreviewDate(data as unknown as string);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showForm, form.interval, form.reference_day, form.reference_month, form.start_date]);
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!activeTenant) return;
     setSubmitting(true);
     setError(null);
 
-    const { error } = await supabase.from('recurrences').insert({
+    const payload = {
       tenant_id: activeTenant.id,
       account_id: form.account_id,
       category_id: form.category_id || null,
@@ -109,15 +143,49 @@ export function RecurrencesPage() {
       reference_month: form.interval === 'yearly' ? Number(form.reference_month) : null,
       start_date: form.start_date,
       end_date: form.end_date || null,
-      is_active: true,
-    });
+    };
+
+    let recurrenceId = editing?.id ?? null;
+
+    if (editing) {
+      const { error } = await supabase.from('recurrences').update(payload).eq('id', editing.id);
+      if (error) {
+        setSubmitting(false);
+        setError(error.message);
+        return;
+      }
+    } else {
+      const { data, error } = await supabase
+        .from('recurrences')
+        .insert({ ...payload, is_active: true })
+        .select('id')
+        .single();
+      if (error) {
+        setSubmitting(false);
+        setError(error.message);
+        return;
+      }
+      recurrenceId = data.id;
+    }
+
+    // A criação já dispara a geração via trigger no banco; chamamos de novo
+    // aqui (idempotente) para cobrir também a edição, que não passa pelo
+    // trigger de reativação, e para garantir a projeção mesmo se o trigger
+    // não rodar por algum motivo.
+    if (recurrenceId) {
+      await supabase.rpc('generate_recurrence_transactions', { p_recurrence_id: recurrenceId });
+    }
 
     setSubmitting(false);
-    if (error) {
-      setError(error.message);
-      return;
-    }
     setShowForm(false);
+    if (expandedId && expandedId === recurrenceId) {
+      const { data } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('recurrence_id', expandedId)
+        .order('date', { ascending: true });
+      if (data) setGenerated(data);
+    }
     refresh();
   }
 
@@ -163,6 +231,24 @@ export function RecurrencesPage() {
     refresh();
   }
 
+  function openEdit(r: Recurrence) {
+    setEditing(r);
+    setForm({
+      description: r.description,
+      amount: String(r.amount),
+      type: r.type,
+      account_id: r.account_id,
+      category_id: r.category_id ?? '',
+      interval: r.interval,
+      reference_day: String(r.reference_day),
+      reference_month: String(r.reference_month ?? 1),
+      start_date: r.start_date,
+      end_date: r.end_date ?? '',
+    });
+    setError(null);
+    setShowForm(true);
+  }
+
   const categoryOptionsForType = categories.filter((c) => c.type === form.type);
 
   return (
@@ -203,6 +289,9 @@ export function RecurrencesPage() {
                 <div className={`amount ${r.type}`}>{formatCurrency(r.amount)}</div>
               </div>
               <div className="card-actions">
+                <button type="button" className="secondary-button" onClick={() => openEdit(r)}>
+                  Editar
+                </button>
                 <button type="button" className="secondary-button" onClick={() => toggleExpand(r)}>
                   {expandedId === r.id ? 'Ocultar lançamentos' : 'Ver lançamentos gerados'}
                 </button>
@@ -239,6 +328,7 @@ export function RecurrencesPage() {
         type="button"
         className="fab"
         onClick={() => {
+          setEditing(null);
           setForm(emptyForm(accounts));
           setError(null);
           setShowForm(true);
@@ -249,7 +339,7 @@ export function RecurrencesPage() {
       </button>
 
       {showForm && (
-        <Modal title="Nova recorrência" onClose={() => setShowForm(false)}>
+        <Modal title={editing ? 'Editar recorrência' : 'Nova recorrência'} onClose={() => setShowForm(false)}>
           <form onSubmit={handleSubmit} className="form">
             <label>
               Descrição
@@ -395,6 +485,13 @@ export function RecurrencesPage() {
                 />
               </label>
             </div>
+
+            {previewDate && (
+              <p className="info-text">
+                Próxima ocorrência: {new Date(previewDate + 'T00:00:00').toLocaleDateString('pt-BR')}
+              </p>
+            )}
+            {previewError && <p className="error-text">{previewError}</p>}
 
             {error && <p className="error-text">{error}</p>}
 
