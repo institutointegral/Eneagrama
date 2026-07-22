@@ -2,15 +2,24 @@
 
 App de controle financeiro pessoal/familiar multi-tenant: modelo de dados no
 Supabase (Postgres + RLS) e um app React. **Fase 1** entregou o CRUD manual de
-contas, categorias, lançamentos, recorrências e metas. **Fase 2** (esta versão)
-adiciona fluxo de caixa, dashboards/gráficos e a engine de cálculo de progresso
-de metas, sobre o mesmo schema — nenhuma tabela da Fase 1 foi alterada
-estruturalmente.
+contas, categorias, lançamentos, recorrências e metas. **Fase 2** adicionou
+fluxo de caixa, dashboards/gráficos e a engine de cálculo de progresso de
+metas. **Fase 3** (esta versão) adiciona vínculo de número WhatsApp por
+tenant, um nível de superadmin da plataforma, e um rascunho do agente
+WhatsApp em n8n — nenhuma tabela das fases anteriores foi alterada
+estruturalmente (só colunas/tabelas novas, aditivas).
 
-**Fora de escopo até aqui:** WhatsApp, IA/Gemini, OCR, billing e onboarding
-self-service automatizado, cron automático de recorrência (a geração é
-automática na criação da regra + sob demanda via botão, ver abaixo). Essas
-fases futuras se apoiam neste schema.
+**Importante sobre o estado da Fase 3:** a parte de banco (migrations, RLS,
+telas Settings/Admin) foi implementada e validada contra o projeto Supabase
+real. A parte de infraestrutura externa (n8n na VPS, credencial UAZAPI/ZPro,
+Redis, Gemini) **não pôde ser testada nem provisionada** nesta sessão — não
+há acesso a essa infraestrutura. O workflow em `n8n/whatsapp-agent-workflow.json`
+é um rascunho escrito a partir da especificação, não validado contra uma
+instância real nem contra o padrão exato do "agente Hellen" citado como
+referência. Ver a seção "Fase 3" abaixo para o que falta fechar.
+
+**Fora de escopo até aqui:** billing/planos SaaS, convite de múltiplos
+membros por tenant, analytics avançado de superadmin, OCR.
 
 ## Status: validado em projeto Supabase real
 
@@ -333,6 +342,155 @@ estas lacunas:
   a estrutura visivelmente pronta para múltiplos tenants por usuário mesmo
   que a tela de convite de membros ainda não exista (fora de escopo).
 
+## Fase 3 — WhatsApp central, vínculo de número e superadmin
+
+### O que foi implementado e validado
+
+Migrations `20260717000001_tenant_whatsapp_links.sql` e
+`20260717000002_platform_admin.sql`, aplicadas e testadas contra o projeto
+Supabase real (dois usuários/tenants simulados via RLS, igual às fases
+anteriores):
+
+- `tenant_whatsapp_links` (status `pending`/`active`/`revoked`) + três
+  functions `SECURITY DEFINER`, no mesmo padrão de `create_tenant`/
+  `settle_transaction` das fases anteriores:
+  - `create_whatsapp_verification_code(p_tenant_id)` — chamada pelo app
+    (Settings > Conectar WhatsApp), gera código de 6 dígitos com expiração
+    de 15 min. Só um membro do tenant pode gerar.
+  - `verify_whatsapp_link(p_code, p_phone_number)` — chamada pelo n8n
+    (role `anon`, já que quem manda a mensagem não é um usuário Supabase
+    autenticado). Ativa o vínculo, revoga o vínculo `active` anterior do
+    mesmo tenant (troca de número) e qualquer outro vínculo que já
+    reivindicasse esse número. Testado: gerar código → ativar → gerar novo
+    código → ativar com número diferente → confirma que o número antigo
+    fica `revoked` e só o novo está `active`.
+  - `resolve_tenant_by_whatsapp(p_phone_number)` — chamada pelo n8n em toda
+    mensagem recebida para descobrir o `tenant_id`. **O workflow nunca deve
+    confiar em um `tenant_id` vindo do conteúdo da mensagem ou do modelo —
+    sempre o valor retornado por esta function.**
+  - RLS: membros do tenant só leem os próprios vínculos
+    (`is_tenant_member`); não há policy de insert/update direto — toda
+    mudança de estado passa pelas functions acima.
+- `platform_admins` (separada de `tenant_users` — um superadmin não é
+  membro de tenant nenhum) + `is_platform_admin()` + coluna nova
+  `tenants.is_active` (aditiva, default `true`) + policies extras de
+  `select`/`update` para admin em `tenants`, `tenant_users`, `accounts`,
+  `categories`, `recurrences`, `transactions`, `goals` e
+  `tenant_whatsapp_links` (Postgres faz OR entre policies permissivas da
+  mesma tabela, então isso só **adiciona** visibilidade para admins, nunca
+  restringe o que um membro comum já via). Três RPCs de conveniência,
+  todas checando `is_platform_admin()` internamente também (não dependem só
+  da RLS): `admin_list_tenants()` (nome, ativo/inativo, contagem de
+  membros/contas/lançamentos, status e número do WhatsApp — tudo agregado
+  numa query só, pensado para não fazer N+1 na tela `/admin`),
+  `admin_tenant_users(p_tenant_id)` (faz join com `auth.users` para trazer
+  e-mail — schema `auth` não é exposto via PostgREST, por isso precisa de
+  uma function em vez de RLS direta) e `admin_set_tenant_active(p_tenant_id,
+  p_is_active)`. Testado: usuário comum chamando `admin_list_tenants()`
+  recebe erro `not authorized`; depois de inserido em `platform_admins`, o
+  mesmo usuário lista tenants (incluindo status do WhatsApp) e consegue
+  desativar um tenant via `admin_set_tenant_active`.
+- **App**: tela **Configurações > Conectar WhatsApp**
+  (`app/src/pages/SettingsPage.tsx`) — mostra o número ativo (mascarado),
+  gera código com contador regressivo de expiração, permite gerar novo
+  código a qualquer momento para trocar de número. Área **`/admin`**
+  (`app/src/pages/AdminPage.tsx`), protegida por um `RequirePlatformAdmin`
+  em `App.tsx` que checa `is_platform_admin()` via RPC (`usePlatformAdmin`
+  hook) — lista tenants com busca por nome, cards de saúde (tenants
+  ativos, WhatsApp conectado, totais da plataforma), ativar/desativar por
+  tenant, e expandir para ver os usuários de um tenant. Um tenant desativado
+  (`tenants.is_active = false`) passa a ver um aviso de bloqueio em vez do
+  conteúdo normal do app (`Layout.tsx`), sem impedir logout.
+
+### O que é rascunho, não testado (falta acesso à infraestrutura)
+
+`n8n/whatsapp-agent-workflow.json` é um workflow n8n escrito a partir da
+especificação da Fase 3, **nunca importado nem executado** numa instância
+n8n real — esta sessão não tem acesso à VPS `srv1314296`, à credencial
+UAZAPI/ZPro, ao Redis, nem ao workflow do "agente Hellen" citado como
+referência de padrão de debounce. O arquivo tem uma Sticky Note e notas por
+node deixando isso explícito. Estrutura do rascunho:
+
+1. Webhook UAZAPI → normaliza a mensagem (texto/áudio/imagem/documento) —
+   o formato exato do payload precisa ser conferido contra a instância real.
+2. Debounce via Redis: empilha a mensagem num buffer por remetente, marca o
+   timestamp da última mensagem, espera alguns segundos, e só segue se
+   nenhuma mensagem mais nova chegou nesse meio tempo (senão a execução mais
+   nova é quem processa o buffer combinado) — **este é o ponto que mais
+   precisa ser comparado com o padrão real do agente Hellen antes de usar
+   em produção**, o rascunho assume uma implementação razoável mas genérica.
+3. Roteamento: chama `resolve_tenant_by_whatsapp`; sem tenant resolvido e
+   mensagem parece um código de 6 dígitos → chama `verify_whatsapp_link`;
+   sem tenant e não é código → responde pedindo para conectar no app; com
+   tenant resolvido → seque para o Gemini.
+4. Gemini com function calling (`criar_lancamento`, `editar_lancamento`,
+   `excluir_lancamento`, `confirmar_baixa_projetado` → chama
+   `settle_transaction`, `consultar_saldo`, `consultar_projetados_pendentes`,
+   `pedir_confirmacao`) — o rascunho documenta o roteamento por função num
+   node Switch, mas **os branches de escrita (insert/update/delete em
+   `transactions` via REST) foram omitidos** por serem repetições do mesmo
+   padrão HTTP Request já mostrado no node `verify_whatsapp_link`; preencher
+   um por função antes de ativar.
+5. Estado de confirmação pendente (`pending_action`) fica no Redis por
+   tenant; em caso de ambiguidade o agente deve sempre chamar
+   `pedir_confirmacao` em vez de gravar direto.
+
+### Credenciais (nunca hardcoded)
+
+Toda credencial fica gerenciada no n8n (Settings > Credentials), referenciada
+no workflow só pelo nome/ID — nada de token/URL embutido no JSON nem no app:
+
+- **UAZAPI/ZPro** (`REPLACE_WITH_UAZAPI_CREDENTIAL_ID` no workflow): base
+  URL + token da instância central.
+- **Supabase anon** (`REPLACE_WITH_SUPABASE_ANON_CREDENTIAL_ID`): URL do
+  projeto + `apikey`/`Authorization` com a chave `anon`/`publishable` (a
+  mesma usada pelo app — nunca a `service_role`, já que todo acesso do n8n
+  passa pelas functions `SECURITY DEFINER` acima, não por bypass de RLS).
+- **Redis** (`REPLACE_WITH_REDIS_CREDENTIAL_ID`): host/porta/senha da
+  instância de buffer.
+- **Gemini** (`REPLACE_WITH_GEMINI_CREDENTIAL_ID`): API key do Google
+  Gemini.
+
+### Rotação da instância/número central
+
+Como o número WhatsApp central é único para toda a plataforma (diferente do
+vínculo por tenant, que já tem sua própria troca via código), trocar a
+instância UAZAPI/ZPro ou o número físico por trás dela é uma operação de
+infraestrutura, feita inteiramente dentro do n8n, sem precisar tocar no
+schema ou no app:
+
+1. Provisionar a nova instância no painel UAZAPI/ZPro e conectar o novo
+   número (escaneando o QR code).
+2. No n8n, editar a credencial existente ("UAZAPI instância central") com a
+   nova base URL/token, **em vez de** criar uma credencial nova — assim
+   todos os nodes que já a referenciam (`REPLACE_WITH_UAZAPI_CREDENTIAL_ID`)
+   continuam funcionando sem precisar editar o workflow.
+3. Atualizar `VITE_WHATSAPP_CENTRAL_NUMBER` no `.env` do app (só o texto
+   exibido em Configurações > Conectar WhatsApp, informativo — não afeta o
+   roteamento, que depende só de `tenant_whatsapp_links.phone_number`).
+4. Os vínculos já `active` de cada tenant continuam válidos — a troca de
+   instância central não invalida vínculos existentes, já que
+   `verify_whatsapp_link`/`resolve_tenant_by_whatsapp` trabalham só com o
+   número do remetente, não com qual instância UAZAPI recebeu a mensagem.
+5. Testar enviando um código de verificação de um tenant de teste para o
+   número novo antes de anunciar a troca aos usuários.
+
+### Promovendo o primeiro superadmin
+
+Não existe tela pública de auto-promoção a superadmin, de propósito. Depois
+de aplicar a migration `20260717000002_platform_admin.sql`, promova o
+primeiro superadmin rodando isto direto no SQL Editor do Supabase (ou via
+`execute_sql`), substituindo pelo e-mail real:
+
+```sql
+insert into public.platform_admins (user_id)
+select id from auth.users where email = 'seu-email@exemplo.com';
+```
+
+A pessoa precisa já ter feito cadastro no app (linha existente em
+`auth.users`) antes desse passo. Depois disso, ao logar, o link "Admin"
+aparece em Mais e a rota `/admin` fica acessível para essa conta.
+
 ## Segurança / RLS
 
 Toda tabela sensível (`accounts`, `categories` custom, `recurrences`,
@@ -351,12 +509,20 @@ consegue ler nem inserir dados no tenant do outro).
 
 ## Próximas fases (não incluídas aqui)
 
-- Integração WhatsApp (entrada de lançamentos via mensagem).
-- IA/Gemini para categorização automática e OCR de comprovantes/faturas.
-- Billing/planos SaaS e onboarding self-service multi-tenant automatizado.
+- **Fechar o rascunho do n8n**: importar `n8n/whatsapp-agent-workflow.json`
+  numa instância real, criar as credenciais (UAZAPI/Supabase/Redis/Gemini),
+  comparar o debounce com o padrão real do agente Hellen, preencher os
+  branches de escrita por função (`criar_lancamento` etc.) e testar
+  ponta-a-ponta com mensagens reais — ver "Fase 3" acima.
+- OCR de comprovantes/faturas (o agente já recebe imagem/documento no
+  rascunho, mas a extração de dados do arquivo em si não foi implementada).
+- Billing/planos SaaS.
+- Convite de múltiplos membros por tenant (schema já suporta via
+  `tenant_users.role`, só falta a tela).
+- Analytics avançado de superadmin (a área `/admin` desta fase é intencionalmente básica: listagem, busca, ativar/desativar).
 - Cron automático de recorrência (hoje é geração na criação da regra +
-  botão manual "Atualizar Projeções" — ver Fase 2 acima).
-- Automação de baixa de fatura de cartão (ver nota técnica acima sobre
+  botão manual "Atualizar Projeções" — ver Fase 2).
+- Automação de baixa de fatura de cartão (ver nota técnica da Fase 2 sobre
   possível dupla contagem na evolução mensal).
 - Acompanhamento de metas de poupança sem conta vinculada (ver nota técnica
-  acima).
+  da Fase 2).

@@ -10,10 +10,12 @@ export type TransactionForm = 'cash' | 'installment';
 export type GoalType = 'budget' | 'savings';
 export type GoalPeriod = 'monthly' | 'yearly' | 'custom';
 export type TenantRole = 'owner' | 'member';
+export type WhatsappLinkStatus = 'pending' | 'active' | 'revoked';
 
 export interface Tenant {
   id: string;
   name: string;
+  is_active: boolean;
   created_at: string;
 }
 
@@ -100,4 +102,36 @@ export interface Goal {
   end_date: string | null;
   description: string | null;
   created_at: string;
+}
+
+export interface TenantWhatsappLink {
+  id: string;
+  tenant_id: string;
+  phone_number: string | null;
+  status: WhatsappLinkStatus;
+  verification_code: string;
+  code_expires_at: string;
+  verified_at: string | null;
+  created_at: string;
+}
+
+// Shape returned by the admin_list_tenants() RPC.
+export interface AdminTenantSummary {
+  tenant_id: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+  member_count: number;
+  account_count: number;
+  transaction_count: number;
+  whatsapp_status: WhatsappLinkStatus | null;
+  whatsapp_phone_number: string | null;
+}
+
+// Shape returned by the admin_tenant_users(p_tenant_id) RPC.
+export interface AdminTenantUser {
+  user_id: string;
+  email: string;
+  role: TenantRole;
+  joined_at: string;
 }

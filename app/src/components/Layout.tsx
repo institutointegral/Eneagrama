@@ -10,9 +10,9 @@ const NAV_ITEMS = [
   { to: '/more', label: 'Mais' },
 ];
 
-// /accounts, /categories and /recurrences are only reachable through "Mais",
-// so that tab should read as active on those pages too.
-const MORE_PREFIXES = ['/more', '/accounts', '/categories', '/recurrences'];
+// /accounts, /categories, /recurrences and /settings are only reachable
+// through "Mais", so that tab should read as active on those pages too.
+const MORE_PREFIXES = ['/more', '/accounts', '/categories', '/recurrences', '/settings'];
 
 export function Layout() {
   const { signOut } = useAuth();
@@ -46,7 +46,14 @@ export function Layout() {
       </header>
 
       <main className="app-content">
-        <Outlet />
+        {activeTenant && !activeTenant.is_active ? (
+          <div className="empty-state">
+            Este espaço financeiro foi desativado por um administrador da plataforma.
+            Entre em contato com o suporte para mais informações.
+          </div>
+        ) : (
+          <Outlet />
+        )}
       </main>
 
       <nav className="app-nav">

@@ -2,6 +2,7 @@ import type { ReactElement } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { useTenant } from './contexts/TenantContext';
+import { usePlatformAdmin } from './hooks/usePlatformAdmin';
 import { Layout } from './components/Layout';
 import { LoginPage } from './pages/LoginPage';
 import { CreateTenantPage } from './pages/CreateTenantPage';
@@ -13,6 +14,8 @@ import { GoalsPage } from './pages/GoalsPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { CashFlowPage } from './pages/CashFlowPage';
 import { MorePage } from './pages/MorePage';
+import { SettingsPage } from './pages/SettingsPage';
+import { AdminPage } from './pages/AdminPage';
 
 function FullScreenLoader() {
   return (
@@ -36,6 +39,13 @@ function RequireTenant({ children }: { children: ReactElement }) {
   return children;
 }
 
+function RequirePlatformAdmin({ children }: { children: ReactElement }) {
+  const { isAdmin, loading } = usePlatformAdmin();
+  if (loading) return <FullScreenLoader />;
+  if (!isAdmin) return <Navigate to="/" replace />;
+  return children;
+}
+
 export default function App() {
   return (
     <Routes>
@@ -45,6 +55,16 @@ export default function App() {
         element={
           <RequireAuth>
             <CreateTenantPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          <RequireAuth>
+            <RequirePlatformAdmin>
+              <AdminPage />
+            </RequirePlatformAdmin>
           </RequireAuth>
         }
       />
@@ -65,6 +85,7 @@ export default function App() {
         <Route path="categories" element={<CategoriesPage />} />
         <Route path="recurrences" element={<RecurrencesPage />} />
         <Route path="goals" element={<GoalsPage />} />
+        <Route path="settings" element={<SettingsPage />} />
         <Route path="more" element={<MorePage />} />
       </Route>
     </Routes>
