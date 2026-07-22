@@ -1,0 +1,377 @@
+{
+  "name": "Eneagrama - Agente WhatsApp (rascunho Fase 3)",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": {
+    "notes": "RASCUNHO NÃO TESTADO. Escrito a partir da especificação da Fase 3, sem acesso à instância n8n real, às credenciais UAZAPI/Redis/Gemini, nem ao workflow do 'agente Hellen' citado como referência de padrão de debounce. Antes de ativar: (1) criar as credenciais listadas em 'Credenciais necessárias' no README, (2) revisar o formato exato do payload recebido do webhook UAZAPI (o node 'Normalizar Mensagem' assume um formato comum, mas precisa ser conferido contra a instância real), (3) comparar o bloco de debounce com o padrão real do agente Hellen e ajustar se divergir, (4) testar cada branch manualmente."
+  },
+  "nodes": [
+    {
+      "id": "sticky-overview",
+      "name": "LEIA-ME",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-480, -320],
+      "parameters": {
+        "width": 460,
+        "height": 300,
+        "content": "## Rascunho não testado\n\nEscrito a partir da spec da Fase 3, sem acesso à instância n8n/UAZAPI/Redis real nem ao workflow do agente Hellen citado como referência. Ver README (seção Fase 3 > n8n) para credenciais necessárias e passo a passo de validação antes de ativar.\n\ntenant_id SEMPRE vem do vínculo resolvido (resolve_tenant_by_whatsapp), nunca do conteúdo da mensagem."
+      }
+    },
+    {
+      "id": "webhook-inbound",
+      "name": "Webhook UAZAPI (inbound)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-480, 0],
+      "parameters": {
+        "path": "eneagrama/whatsapp-inbound",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "normalize-message",
+      "name": "Normalizar Mensagem",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-240, 0],
+      "notes": "Formato do payload UAZAPI precisa ser confirmado contra a instância real — os caminhos abaixo são um palpite razoável baseado em payloads Baileys/UAZAPI típicos.",
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\nconst msg = body.message ?? body;\nconst senderRaw = msg.key?.remoteJid ?? msg.from ?? msg.sender ?? '';\n// Normaliza para um JID/E.164 consistente com o que fica salvo em\n// tenant_whatsapp_links.phone_number.\nconst senderPhone = senderRaw.replace(/:[0-9]+@/, '@');\n\nlet messageType = 'text';\nlet textContent = msg.message?.conversation\n  ?? msg.message?.extendedTextMessage?.text\n  ?? msg.text\n  ?? '';\nlet mediaUrl = null;\n\nif (msg.message?.audioMessage) { messageType = 'audio'; mediaUrl = msg.message.audioMessage.url ?? null; }\nif (msg.message?.imageMessage) { messageType = 'image'; mediaUrl = msg.message.imageMessage.url ?? null; textContent = msg.message.imageMessage.caption ?? ''; }\nif (msg.message?.documentMessage) { messageType = 'document'; mediaUrl = msg.message.documentMessage.url ?? null; }\n\nreturn [{\n  json: {\n    sender_phone: senderPhone,\n    message_type: messageType,\n    text_content: textContent,\n    media_url: mediaUrl,\n    received_at: new Date().toISOString(),\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "redis-push-buffer",
+      "name": "Redis: empilhar no buffer",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "notes": "Mesmo padrão de debounce do agente Hellen (a confirmar/ajustar): empilha a mensagem numa lista por remetente e marca o timestamp da última mensagem recebida, ambos com TTL curto.",
+      "parameters": {
+        "operation": "push",
+        "key": "=wa:buffer:{{$json.sender_phone}}",
+        "messageData": "={{JSON.stringify($json)}}",
+        "tail": true
+      },
+      "credentials": { "redis": { "id": "REPLACE_WITH_REDIS_CREDENTIAL_ID", "name": "Redis (Eneagrama)" } }
+    },
+    {
+      "id": "redis-set-last-ts",
+      "name": "Redis: marcar timestamp",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [0, 160],
+      "parameters": {
+        "operation": "set",
+        "key": "=wa:last:{{$json.sender_phone}}",
+        "value": "={{$json.received_at}}",
+        "expire": true,
+        "ttl": 30
+      },
+      "credentials": { "redis": { "id": "REPLACE_WITH_REDIS_CREDENTIAL_ID", "name": "Redis (Eneagrama)" } }
+    },
+    {
+      "id": "wait-debounce",
+      "name": "Aguardar debounce (6s)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [240, 0],
+      "parameters": { "amount": 6, "unit": "seconds" }
+    },
+    {
+      "id": "redis-get-last-ts",
+      "name": "Redis: ler último timestamp",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [480, 0],
+      "parameters": {
+        "operation": "get",
+        "key": "=wa:last:{{$json.sender_phone}}",
+        "propertyName": "last_timestamp"
+      },
+      "credentials": { "redis": { "id": "REPLACE_WITH_REDIS_CREDENTIAL_ID", "name": "Redis (Eneagrama)" } }
+    },
+    {
+      "id": "if-is-latest",
+      "name": "É a mensagem mais recente?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [720, 0],
+      "notes": "Se chegou mensagem nova depois desta durante a espera, esta execução para — a execução disparada pela mensagem mais nova é quem processa o buffer combinado.",
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "" },
+          "conditions": [
+            {
+              "leftValue": "={{$json.last_timestamp}}",
+              "rightValue": "={{$('Normalizar Mensagem').item.json.received_at}}",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "noop-stale",
+      "name": "Parar (mensagem superada)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [960, 160],
+      "parameters": {}
+    },
+    {
+      "id": "redis-read-clear-buffer",
+      "name": "Redis: ler e limpar buffer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, -80],
+      "notes": "Combina as mensagens acumuladas do buffer (ex.: usuário mandou 3 áudios/textos seguidos) num único texto antes de mandar pro Gemini.",
+      "parameters": {
+        "jsCode": "// Espera-se um node Redis (LRANGE + DEL) antes deste, ou substitua por\n// chamadas Redis nativas do n8n. Mantido como Code node no rascunho para\n// deixar explícito o formato esperado de saída.\nconst phone = $json.sender_phone;\nconst items = $items('Redis: empilhar no buffer').map(i => JSON.parse(i.json.value ?? i.json));\nconst combinedText = items.map(i => i.text_content).filter(Boolean).join('\\n');\nreturn [{ json: { sender_phone: phone, combined_text: combinedText, message_type: items.at(-1)?.message_type ?? 'text' } }];\n"
+      }
+    },
+    {
+      "id": "http-resolve-tenant",
+      "name": "Supabase: resolve_tenant_by_whatsapp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, -80],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$credentials.supabaseAnon.projectUrl}}/rest/v1/rpc/resolve_tenant_by_whatsapp",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }] },
+        "sendBody": true,
+        "bodyParameters": { "parameters": [{ "name": "p_phone_number", "value": "={{$json.sender_phone}}" }] },
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "REPLACE_WITH_SUPABASE_ANON_CREDENTIAL_ID", "name": "Supabase anon (apikey + Authorization headers)" } }
+    },
+    {
+      "id": "if-tenant-resolved",
+      "name": "Tenant resolvido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1440, -80],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "" },
+          "conditions": [
+            { "leftValue": "={{$json}}", "rightValue": "", "operator": { "type": "string", "operation": "notEmpty" } }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "if-looks-like-code",
+      "name": "Parece um código de 6 dígitos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1680, 160],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "" },
+          "conditions": [
+            { "leftValue": "={{$('Redis: ler e limpar buffer').item.json.combined_text.trim()}}", "rightValue": "^\\d{6}$", "operator": { "type": "string", "operation": "regex" } }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "http-verify-link",
+      "name": "Supabase: verify_whatsapp_link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 80],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$credentials.supabaseAnon.projectUrl}}/rest/v1/rpc/verify_whatsapp_link",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }] },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "p_code", "value": "={{$('Redis: ler e limpar buffer').item.json.combined_text.trim()}}" },
+            { "name": "p_phone_number", "value": "={{$('Normalizar Mensagem').item.json.sender_phone}}" }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "REPLACE_WITH_SUPABASE_ANON_CREDENTIAL_ID", "name": "Supabase anon (apikey + Authorization headers)" } }
+    },
+    {
+      "id": "if-verify-ok",
+      "name": "Vínculo ativado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2160, 80],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "" },
+          "conditions": [
+            { "leftValue": "={{$json[0]?.out_status}}", "rightValue": "active", "operator": { "type": "string", "operation": "equals" } }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "set-reply-linked",
+      "name": "Resposta: número conectado",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [2400, 0],
+      "parameters": { "assignments": { "assignments": [{ "name": "reply_text", "value": "✅ Número conectado! Agora você já pode registrar lançamentos por aqui." }] } }
+    },
+    {
+      "id": "set-reply-invalid-code",
+      "name": "Resposta: código inválido",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [2400, 160],
+      "parameters": { "assignments": { "assignments": [{ "name": "reply_text", "value": "❌ Código inválido ou expirado. Gere um novo em Configurações > Conectar WhatsApp no app." }] } }
+    },
+    {
+      "id": "set-reply-not-linked",
+      "name": "Resposta: não conectado",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1920, 320],
+      "parameters": { "assignments": { "assignments": [{ "name": "reply_text", "value": "Ainda não encontrei seu número conectado. Abra o app, vá em Configurações > Conectar WhatsApp, gere um código e envie ele pra mim." }] } }
+    },
+    {
+      "id": "redis-get-pending",
+      "name": "Redis: ler confirmação pendente",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [1680, -240],
+      "parameters": {
+        "operation": "get",
+        "key": "=wa:pending:{{$json[0]}}",
+        "propertyName": "pending_action"
+      },
+      "credentials": { "redis": { "id": "REPLACE_WITH_REDIS_CREDENTIAL_ID", "name": "Redis (Eneagrama)" } }
+    },
+    {
+      "id": "http-gemini-function-call",
+      "name": "Gemini: function calling",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, -240],
+      "notes": "tools/function_declarations: criar_lancamento, editar_lancamento, excluir_lancamento, confirmar_baixa_projetado, consultar_saldo, consultar_projetados_pendentes, pedir_confirmacao. O prompt de sistema deve instruir: em caso de ambiguidade, SEMPRE chamar pedir_confirmacao em vez de qualquer function que grave dado, e nunca inferir tenant_id da mensagem (ele é injetado aqui pelo workflow, não pelo modelo).",
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  system_instruction: { parts: [{ text: \"Você é o agente financeiro do Eneagrama. tenant_id já resolvido: \" + $('Tenant resolvido?').item.json + \". Em caso de ambiguidade, SEMPRE chame pedir_confirmacao. Nunca grave direto se houver dúvida.\" }] },\n  contents: [{ role: 'user', parts: [{ text: $('Redis: ler e limpar buffer').item.json.combined_text }] }],\n  tools: [{ function_declarations: [\n    { name: 'criar_lancamento', description: 'Cria um lançamento realizado ou projetado' },\n    { name: 'editar_lancamento', description: 'Edita um lançamento existente' },\n    { name: 'excluir_lancamento', description: 'Exclui um lançamento existente' },\n    { name: 'confirmar_baixa_projetado', description: 'Chama settle_transaction para baixar um projetado' },\n    { name: 'consultar_saldo', description: 'Consulta saldo consolidado ou de uma conta' },\n    { name: 'consultar_projetados_pendentes', description: 'Lista projetados ainda não baixados' },\n    { name: 'pedir_confirmacao', description: 'Usado quando há ambiguidade; nunca grava nada' }\n  ] }]\n}) }}",
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "REPLACE_WITH_GEMINI_CREDENTIAL_ID", "name": "Gemini API key" } }
+    },
+    {
+      "id": "switch-route-function",
+      "name": "Roteia por função escolhida",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [2160, -240],
+      "parameters": {
+        "rules": {
+          "values": [
+            { "outputKey": "criar_lancamento", "conditions": { "conditions": [{ "leftValue": "={{$json.function_name}}", "rightValue": "criar_lancamento", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "outputKey": "editar_lancamento", "conditions": { "conditions": [{ "leftValue": "={{$json.function_name}}", "rightValue": "editar_lancamento", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "outputKey": "excluir_lancamento", "conditions": { "conditions": [{ "leftValue": "={{$json.function_name}}", "rightValue": "excluir_lancamento", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "outputKey": "confirmar_baixa_projetado", "conditions": { "conditions": [{ "leftValue": "={{$json.function_name}}", "rightValue": "confirmar_baixa_projetado", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "outputKey": "consultar_saldo", "conditions": { "conditions": [{ "leftValue": "={{$json.function_name}}", "rightValue": "consultar_saldo", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "outputKey": "consultar_projetados_pendentes", "conditions": { "conditions": [{ "leftValue": "={{$json.function_name}}", "rightValue": "consultar_projetados_pendentes", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "outputKey": "pedir_confirmacao", "conditions": { "conditions": [{ "leftValue": "={{$json.function_name}}", "rightValue": "pedir_confirmacao", "operator": { "type": "string", "operation": "equals" } }] } }
+          ]
+        },
+        "fallbackOutput": "pedir_confirmacao"
+      },
+      "notes": "Cada saída deste Switch deve chamar o endpoint Supabase REST correspondente (insert/update/delete em transactions, ou rpc/settle_transaction), sempre usando o tenant_id resolvido no passo 'Tenant resolvido?' — nunca um valor vindo do Gemini/mensagem. Ramos de escrita omitidos neste rascunho por serem repetições do mesmo padrão de HTTP Request já mostrado em 'Supabase: verify_whatsapp_link'; ver README para o mapeamento completo de endpoint por função."
+    },
+    {
+      "id": "http-send-reply",
+      "name": "UAZAPI: enviar resposta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2640, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$credentials.uazapi.baseUrl}}/send/text",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }] },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "number", "value": "={{$('Normalizar Mensagem').item.json.sender_phone}}" },
+            { "name": "text", "value": "={{$json.reply_text}}" }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "REPLACE_WITH_UAZAPI_CREDENTIAL_ID", "name": "UAZAPI instância central" } }
+    },
+    {
+      "id": "webhook-response",
+      "name": "Responder Webhook (200 OK)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2880, 0],
+      "parameters": { "respondWith": "text", "responseBody": "ok" }
+    }
+  ],
+  "connections": {
+    "Webhook UAZAPI (inbound)": { "main": [[{ "node": "Normalizar Mensagem", "type": "main", "index": 0 }]] },
+    "Normalizar Mensagem": {
+      "main": [[
+        { "node": "Redis: empilhar no buffer", "type": "main", "index": 0 },
+        { "node": "Redis: marcar timestamp", "type": "main", "index": 0 }
+      ]]
+    },
+    "Redis: marcar timestamp": { "main": [[{ "node": "Aguardar debounce (6s)", "type": "main", "index": 0 }]] },
+    "Aguardar debounce (6s)": { "main": [[{ "node": "Redis: ler último timestamp", "type": "main", "index": 0 }]] },
+    "Redis: ler último timestamp": { "main": [[{ "node": "É a mensagem mais recente?", "type": "main", "index": 0 }]] },
+    "É a mensagem mais recente?": {
+      "main": [
+        [{ "node": "Redis: ler e limpar buffer", "type": "main", "index": 0 }],
+        [{ "node": "Parar (mensagem superada)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Redis: ler e limpar buffer": { "main": [[{ "node": "Supabase: resolve_tenant_by_whatsapp", "type": "main", "index": 0 }]] },
+    "Supabase: resolve_tenant_by_whatsapp": { "main": [[{ "node": "Tenant resolvido?", "type": "main", "index": 0 }]] },
+    "Tenant resolvido?": {
+      "main": [
+        [{ "node": "Redis: ler confirmação pendente", "type": "main", "index": 0 }],
+        [{ "node": "Parece um código de 6 dígitos?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parece um código de 6 dígitos?": {
+      "main": [
+        [{ "node": "Supabase: verify_whatsapp_link", "type": "main", "index": 0 }],
+        [{ "node": "Resposta: não conectado", "type": "main", "index": 0 }]
+      ]
+    },
+    "Supabase: verify_whatsapp_link": { "main": [[{ "node": "Vínculo ativado?", "type": "main", "index": 0 }]] },
+    "Vínculo ativado?": {
+      "main": [
+        [{ "node": "Resposta: número conectado", "type": "main", "index": 0 }],
+        [{ "node": "Resposta: código inválido", "type": "main", "index": 0 }]
+      ]
+    },
+    "Redis: ler confirmação pendente": { "main": [[{ "node": "Gemini: function calling", "type": "main", "index": 0 }]] },
+    "Gemini: function calling": { "main": [[{ "node": "Roteia por função escolhida", "type": "main", "index": 0 }]] },
+    "Resposta: número conectado": { "main": [[{ "node": "UAZAPI: enviar resposta", "type": "main", "index": 0 }]] },
+    "Resposta: código inválido": { "main": [[{ "node": "UAZAPI: enviar resposta", "type": "main", "index": 0 }]] },
+    "Resposta: não conectado": { "main": [[{ "node": "UAZAPI: enviar resposta", "type": "main", "index": 0 }]] },
+    "UAZAPI: enviar resposta": { "main": [[{ "node": "Responder Webhook (200 OK)", "type": "main", "index": 0 }]] }
+  }
+}
